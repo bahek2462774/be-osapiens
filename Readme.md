@@ -293,3 +293,106 @@ Implement an API endpoint to retrieve the final results of a completed workflow.
 
 ---
 
+## Implementation Notes (Solution)
+
+This section documents the implemented features and how to test them.
+
+### What was added
+
+- **`PolygonAreaJob`** (`src/jobs/PolygonAreaJob.ts`) — calculates the polygon area (in square
+  meters) from `task.geoJson` using `@turf/area`. Invalid GeoJSON throws, so the task is marked
+  `failed`. Registered as task type `polygonArea`.
+- **`ReportGenerationJob`** (`src/jobs/ReportGenerationJob.ts`) — aggregates the outputs of all
+  preceding tasks in the workflow into a JSON report (failed tasks are included with their error).
+  Registered as task type `reportGeneration`. Runs last via the dependency mechanism.
+- **Interdependent tasks** — the `Task` entity has a new `dependsOn` field (holds the dependency's
+  `taskId`). The YAML format supports `dependsOn: <stepNumber>`; `WorkflowFactory` resolves the step
+  number into the real task id (`src/workflows/dependencies.ts`). The worker (`taskWorker.ts`) only
+  runs a task once its dependency has completed, skips blocked tasks, and fails a task whose
+  dependency failed.
+- **Task output** — the `Task` entity has a new `output` field storing the serialized job result,
+  used for report/finalResult aggregation.
+- **Workflow finalResult** — the `Workflow` entity has a new `finalResult` field. Once **all** tasks
+  settle, `TaskRunner` aggregates every task's output (including failures) and saves it. The workflow
+  stays `in_progress` until then, and only then becomes `completed` or `failed`.
+- **New endpoints** — `GET /workflow/:id/status` and `GET /workflow/:id/results` (see below).
+
+### Example workflow
+
+`src/workflows/example_workflow.yml` demonstrates all job types and a dependency:
+
+```yaml
+name: "example_workflow"
+steps:
+  - taskType: "analysis"
+    stepNumber: 1
+  - taskType: "polygonArea"
+    stepNumber: 2
+  - taskType: "notification"
+    stepNumber: 3
+  - taskType: "reportGeneration"
+    stepNumber: 4
+    dependsOn: 3      # runs only after step 3 completes
+```
+
+### API Endpoints
+
+**Create a workflow**
+
+```bash
+curl -X POST http://localhost:3000/analysis \
+  -H "Content-Type: application/json" \
+  -d '{"clientId":"client123","geoJson":{"type":"Polygon","coordinates":[[[-63.62,-10.31],[-63.62,-10.36],[-63.61,-10.36],[-63.61,-10.31],[-63.62,-10.31]]]}}'
+# -> 202 { "workflowId": "...", "message": "Workflow created and tasks queued from YAML definition." }
+```
+
+**Get workflow status** — `GET /workflow/:id/status`
+
+```json
+{ "workflowId": "3433c76d-...", "status": "in_progress", "completedTasks": 3, "totalTasks": 4 }
+```
+Returns `404` if the workflow does not exist.
+
+**Get workflow results** — `GET /workflow/:id/results`
+
+```json
+{
+  "workflowId": "3433c76d-...",
+  "status": "completed",
+  "finalResult": {
+    "workflowId": "3433c76d-...",
+    "totalTasks": 4,
+    "completedTasks": 4,
+    "failedTasks": 0,
+    "tasks": [
+      { "taskId": "...", "stepNumber": 1, "type": "analysis", "status": "completed", "output": "Brazil" },
+      { "taskId": "...", "stepNumber": 2, "type": "polygonArea", "status": "completed", "output": { "area": 8363324.27, "unit": "square_meters" } }
+    ]
+  }
+}
+```
+Returns `404` if the workflow does not exist, and `400` if it has not settled yet
+(status `initial`/`in_progress`). Failed tasks appear with an `error` field.
+
+### Running the app
+
+```bash
+npm install
+npm start        # or: npm run dev  (auto-reload)
+```
+
+> **Note (local setup):** the `sqlite3` native module builds with `node-gyp`, which needs Python's
+> `distutils`. On Python 3.12+ install it first: `python3 -m pip install setuptools`.
+
+### Running the tests
+
+Unit tests use **Vitest** and cover the pure logic (area calculation, output aggregation, and
+dependency resolution) without a database:
+
+```bash
+npm test          # single run
+npm run test:watch
+```
+
+---
+

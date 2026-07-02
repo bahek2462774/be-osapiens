@@ -4,17 +4,13 @@ import { DataSource } from 'typeorm';
 import { Workflow } from '../models/Workflow';
 import { Task } from '../models/Task';
 import {TaskStatus} from "../workers/taskRunner";
+import { WorkflowStep, assignDependencies } from './dependencies';
 
 export enum WorkflowStatus {
     Initial = 'initial',
     InProgress = 'in_progress',
     Completed = 'completed',
     Failed = 'failed'
-}
-
-interface WorkflowStep {
-    taskType: string;
-    stepNumber: number;
 }
 
 interface WorkflowDefinition {
@@ -55,7 +51,14 @@ export class WorkflowFactory {
             return task;
         });
 
-        await taskRepository.save(tasks);
+        // First pass: persist tasks so each one gets a generated taskId.
+        const savedTasks = await taskRepository.save(tasks);
+
+        // Second pass: resolve `dependsOn: <stepNumber>` references into real task ids.
+        assignDependencies(workflowDef.steps, savedTasks);
+        if (savedTasks.some(t => t.dependsOn)) {
+            await taskRepository.save(savedTasks);
+        }
 
         return savedWorkflow;
     }
